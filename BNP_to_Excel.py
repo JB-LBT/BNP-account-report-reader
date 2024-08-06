@@ -17,10 +17,10 @@ with col1:
     logo = Image.open("Images\BNP_to_Excel.png")
     st.image(logo, use_column_width=True)
 with col2:
-    st.title('BNP report to Excel')
+    st.title('BNP statement to Excel')
 
 # Upload PDF file
-uploaded_file = st.file_uploader("Upload your BNP PDF account report", type=["pdf"])
+uploaded_file = st.file_uploader("Upload your BNP PDF monthly statement", type=["pdf"])
 
 # Input for destination file name
 destination_name = st.text_input("Destination file name")

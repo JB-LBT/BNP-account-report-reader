@@ -12,15 +12,18 @@ import pandas as pd
 from functools import wraps
 from datetime import datetime
 from llama_parse import LlamaParse
+from dotenv import load_dotenv
 
 with open("llamaparse_key.txt", "r") as f:
     os.environ["LLAMA_CLOUD_API_KEY"] = f.read().strip()
 
 nest_asyncio.apply()
 
+# read the .env file
+load_dotenv()
 
 months_mapping = {"janvier":1, "février":2, "mars":3, "avril":4, "mai":5, "juin":6, "juillet":7, "août":8, "septembre":9, "octobre":10, "novembre":11, "décembre":12}
-ACCOUNT_ID = "JB_courant"
+ACCOUNT_ID = os.getenv("ACCOUNT_ID")
 CATEGORY_LIST = ["Transports", "Vie quotidienne", "Logement", "Loisirs", "Santé", "Impôts", "Banque", "Salaire", "Epargne", "Autre"]
 
 
