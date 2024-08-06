@@ -1,0 +1,6 @@
+llama-parse
+matplotlib
+numpy
+pandas
+openpyxl
+streamlit
