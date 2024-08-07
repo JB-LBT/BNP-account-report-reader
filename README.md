@@ -56,7 +56,7 @@ A recording of the whole process is avaliable in the "Image" folder (Demo_app.mp
 
 You can also use the app via its API. To do so, you can take inspiration from the code in "Example.ipynb".
 
-- Modify the environment variables in the .env file: add an ID that will be used to name your files: "ACCOUNT8ID = <your_name>"
+- Modify the environment variables in the .env file: add an ID that will be used to name your files: "ACCOUNT_ID = <your_name>"
 
 - Import the module via
 
