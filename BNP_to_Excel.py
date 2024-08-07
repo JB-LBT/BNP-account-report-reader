@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 from PIL import Image
-from src import *
+from src.Monthly_Summary import *
 
 def process(pdf_path, destination_name):
     # Placeholder for the processing logic that uses functions from the src module

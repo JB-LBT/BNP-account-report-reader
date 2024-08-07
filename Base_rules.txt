@@ -1,0 +1,10 @@
+RATP:Transports
+TOTAL:Transports
+EPARGNE:Epargne
+SNCF:Transports
+RETROCESSION:Banque
+COMMISSION:Banque
+LECLERC:Vie quotidienne
+PRET:Banque
+AUCHAN:Vie quotidienne
+VIR CPTE A CPTE:Epargne
