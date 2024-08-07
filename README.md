@@ -4,7 +4,7 @@
 
 This project is a Streamlit web application that allows users to transform a bank account report PDF into an Excel file. The generated Excel file includes some graphics and key metrics extracted from the report. This tool is useful for financial analysis and visualization of bank account statements.
 
-![Start interface](Images\App0.png)
+![Start interface](App0.png)
 
 ## Installation
 
@@ -42,12 +42,12 @@ streamlit run BNP_to_Excel.py
 
 This will start the Streamlit server, and you can interact with the app in your web browser. The app interface allows you to upload a PDF file and input a destination file name. When you click the "Run" button, the app processes the PDF and generates an Excel file.
 
-![Start interface](Images\App0.png)
-![Filled Interface](Images\App1.png)
-![Result Interface](Images\App2.png)
+![Start interface](App0.png)
+![Filled Interface](App1.png)
+![Result Interface](App2.png)
 
 Here is the final excel file obtained at the end of the processing:
-![Final Excel](Images\Excel0.png)
+![Final Excel](Excel0.png)
 
 A recording of the whole process is avaliable in the "Image" folder (Demo_app.mp4).
 
