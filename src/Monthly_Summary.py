@@ -14,6 +14,7 @@ import pandas as pd
 from functools import wraps
 from datetime import datetime
 from llama_parse import LlamaParse
+from pickle import dump, load
 #from dotenv import load_dotenv
 from src.utils import *
 
@@ -26,10 +27,13 @@ nest_asyncio.apply()
 #load_dotenv()
 
 months_mapping = {"janvier":1, "février":2, "mars":3, "avril":4, "mai":5, "juin":6, "juillet":7, "août":8, "septembre":9, "octobre":10, "novembre":11, "décembre":12}
+months_mapping_inv = {v: k for k, v in months_mapping.items()}
 #ACCOUNT_ID = os.getenv("ACCOUNT_ID")
 ACCOUNT_ID = "JB_courant"
 CATEGORY_LIST = ["Transports", "Vie quotidienne", "Logement", "Loisirs", "Santé", "Impôts", "Banque", "Salaire", "Epargne", "Autre"]
-
+LOG_FOLDER = "logs"
+if not os.path.exists(LOG_FOLDER):
+    os.makedirs(LOG_FOLDER)
 
 
 
@@ -39,6 +43,402 @@ CATEGORY_LIST = ["Transports", "Vie quotidienne", "Logement", "Loisirs", "Santé
 ##################################### CORE FUNCTIONS #######################################
 
 ############################################################################################
+
+
+
+
+class Statement_Parser:
+    def __init__(self, 
+                 document,
+                 mode = "text",
+                 logger = None,
+                 **kwargs):
+        self.document = document
+        self.mode = mode
+        self.parse_args(kwargs)
+        if not logger:
+            now = datetime.now()
+            # format the date as YYYY-MM-DD_HH-MM-SS
+            now = now.strftime("%Y-%m-%d_%H-%M-%S")
+            logger_name = f"{LOG_FOLDER}/parser_{self.pdf.split('/')[-1].split('.')[0]}_{now}.log"
+            self.logger = Logger(logger_name,self.formatting, self.do_log)
+        else:
+            self.logger = logger
+
+        self.logger.log("Parser initialized")
+        self.logger.log(f"Document to parse: {self.document}")
+        self.logger.log(f"Mode: {self.mode}")
+
+
+    def parse_args(self, kwargs):
+        """Parse the keyword arguments and set the attributes of the class.
+
+        Parameters:
+        -----------
+        kwargs : dict
+            The keyword arguments to parse.
+
+        Returns:
+        --------
+        None
+        """
+
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+        if "verbose" not in kwargs and not hasattr(self, "verbose"):
+            self.verbose = True
+        if "do_log" not in kwargs and not hasattr(self, "do_log"):
+            self.do_log = True
+        if "formatting" not in kwargs and not hasattr(self, "formatting"):
+            self.formatting = True
+        if "rules_file" not in kwargs and not hasattr(self, "rules_file"):
+            self.rules_file = None
+        if "ask_rules" not in kwargs and not hasattr(self, "ask_rules"):
+            self.ask_rules = False
+        if "handle_errors" not in kwargs and not hasattr(self, "handle_errors"):
+            self.handle_errors = True
+
+        return None
+    
+    def format_dataframe(self):
+        if not hasattr(self, "data"):
+            if self.handle_errors:
+                self.logger.warning("No data to format")
+                return None
+            else:
+                self.logger.error("No data to format", title="ERROR when formatting parser data")
+                raise ValueError("No data to format")
+            
+        try:            
+            # Fill the missing values and blanks " " with 0
+            self.data["Debit (€)"] = self.data["Debit (€)"].str.replace(" ", "")
+            self.data["Credit (€)"] = self.data["Credit (€)"].str.replace(" ", "")
+            
+            # Fill the empty values with 0
+            self.data["Debit (€)"] = self.data["Debit (€)"].replace("", "0")
+            self.data["Credit (€)"] = self.data["Credit (€)"].replace("", "0")
+            
+            # Convert the amounts to float
+            self.data["Debit (€)"] = self.data["Debit (€)"].str.replace(",", ".").astype(float)
+            self.data["Credit (€)"] = self.data["Credit (€)"].str.replace(",", ".").astype(float)
+
+        except Exception as e:
+            self.logger.error(f"Error while formatting the operations amounts: {e}", title = "Formatting error")
+            if not self.handle_errors:
+                raise e
+            
+        try:
+            # check if the dates are between december and january
+            december = False
+            january = False
+            for i, date in enumerate(self.data["Date"]):
+                if date.split(".")[1] == "12":
+                    december = True
+                if date.split(".")[1] == "01":
+                    january = True
+
+            def add_date(date):
+                if date.split(".")[1] == "01" and december and january:
+                    return date + f".{self.start_year+1}"
+                else:
+                    return date + f".{self.start_year}"
+                
+            self.data["Date"] = self.data["Date"].apply(add_date)
+            self.data["Operation Date"] = self.data["Operation Date"].apply(add_date)
+
+            # Convert the dates to datetime
+            self.data["Date"] = pd.to_datetime(self.data["Date"], format="%d.%m.%Y")
+            self.data["Operation Date"] = pd.to_datetime(self.data["Operation Date"], format="%d.%m.%Y")
+
+        except Exception as e:
+            self.logger.error(f"Error while formatting the operations dates: {e}", title = "Formatting error")
+            if not self.handle_errors:
+                raise e
+            
+        return None
+    
+    def load_document(self):
+        """Load the PDF file and parse it to extract the operations."""
+        from llama_parse import LlamaParse
+        parser = LlamaParse( # can also be set in your env as LLAMA_CLOUD_API_KEY
+            result_type=self.mode,  # "markdown" and "text" are available
+            num_workers=4,  # if multiple files passed, split in `num_workers` API calls
+            verbose=False,
+            language="en",  # Optionally you can define a language, default=en
+        )
+
+        self.parsed_document = None
+
+        pickle_file = f"{self.document.split('.')[0]}_{self.mode}.pkl"
+        if os.path.exists(pickle_file):
+            try:
+                with open(pickle_file, "rb") as f:
+                    self.parsed_document = load(f)
+                    self.logger.log(f"Document {self.document} successfully loaded from pickle file {pickle_file}")
+                    return None
+            except Exception as e:
+                self.logger.error(f"Error while loading the pickle file: {e}", title = "Loading error")
+                self.logger.warning("Deleting the pickle file and parsing the document from scratch")
+                os.remove(pickle_file)
+                self.logger.warning("Parsing the document from scratch")
+
+        # sync
+        try:
+            documents = parser.load_data(self.document)
+        except Exception as e:
+            self.logger.error(f"Error while loading the document: {e}", title = "Loading error")
+            if not self.handle_errors:
+                raise e
+            
+        self.logger.log(f"Document successfully loaded in mode {self.mode}")
+        self.parsed_document = documents
+        dump(documents, open(pickle_file, "wb"))
+        self.logger.log(f"Document successfully saved to pickle file {pickle_file}")
+        return None
+    
+    def _check_operations(self, page):
+        if "Crédit" and "Débit" in page:
+            return True
+
+        return False
+    
+    def _strip_first_page(self, page):
+
+        try:
+            for i, line in enumerate(page.split("\n")):
+                if "RELEVE DE COMPTE" in line:
+                    break
+            line = line.split("du")[1].split("au")[0].strip()[-4:]
+            self.start_year = int(line)
+        except Exception as e:
+            self.logger.error(f"Error while getting the start year: {e}", title = "Parsing error")
+            self.start_year = 2000
+            if not self.handle_errors:
+                raise e
+            
+        try:
+            for i, line in enumerate(page.split("\n")):
+                if "SOLDE CREDITEUR AU" in line:
+                    break
+            line = line.split("AU")[1].strip()[:15].strip()
+            # Convert from dd.mm.yyyy to datetime
+            self.start_date = pd.to_datetime(line, format="%d.%m.%Y")
+        except Exception as e:
+            self.logger.error(f"Error while getting the start date: {e}", title = "Parsing error")
+
+            if not self.handle_errors:
+                raise e 
+
+
+        if "TOTAL DES OPERATIONS" in page:
+            try:
+                for i in range(len(page.split("\n"))-1, 0, -1):
+                    line = page.split("\n")[i]
+                    if "SOLDE CREDITEUR AU" in line:
+                        break
+                line = line.split("AU")[1].strip()[:15].strip()
+                # Convert from dd.mm.yyyy to datetime
+                self.end_date = pd.to_datetime(line, format="%d.%m.%Y")
+            except Exception as e:
+                self.logger.error(f"Error while getting the end date: {e}", title = "Parsing error")
+
+                if not self.handle_errors:
+                    raise e 
+            page = page.split("TOTAL DES OPERATIONS")[0]
+        else:
+            page = page.split("BNP PARIBAS SA")[0]
+
+        page = page.split("Monnaie du compte : Euro")[1]
+        page_lines = page.split("\n")
+        page_lines = [line for line in page_lines if line]
+        return page_lines
+    
+    def _strip_reg_page(self, page):
+        if "TOTAL DES OPERATIONS" in page:
+            try:
+                for i in range(len(page.split("\n"))-1, 0, -1):
+                    line = page.split("\n")[i]
+                    if "SOLDE CREDITEUR AU" in line:
+                        break
+                line = line.split("AU")[1].strip()[:15].strip()
+                # Convert from dd.mm.yyyy to datetime
+                self.end_date = pd.to_datetime(line, format="%d.%m.%Y")
+            except Exception as e:
+                self.logger.error(f"Error while getting the end date: {e}", title = "Parsing error")
+
+                if not self.handle_errors:
+                    raise e 
+            page = page.split("TOTAL DES OPERATIONS")[0]
+        else:
+            page = page.split("\n\n")[-2]
+        page_lines = page.split("\n")
+        for i, l in enumerate(page_lines):
+            if "RIB" in l:
+                page_lines = page_lines[i+1:]
+                break
+
+        page_lines = [line for line in page_lines if line]
+        return page_lines
+    
+    def _parse_page_txt(self, page_lines):
+        data = []
+        keys = ["Date", "Description", "Operation Date", "Debit (€)", "Credit (€)"]
+        try:
+            headers = page_lines[0]
+            # find the index of "Nature des opérations"
+            desc_index = headers.index("Nature des opérations")
+            # find the index of "Valeur"
+            valeur_index = headers.index("Valeur")
+            # find the index of "Débit"
+            debit_index = headers.index("Débit")
+            # find the index of "Crédit"
+            credit_index = headers.index("Crédit")
+
+        except Exception as e:
+            self.logger.error(f"Error while parsing the headers of the operations: {e}", title = "Parsing error")
+            if not self.handle_errors:
+                raise e
+
+        page_lines = [p for p in page_lines if "SOLDE CREDITEUR" not in p]
+
+        for line in page_lines[1:]:
+
+            if len(line) <= valeur_index:
+                data[-1]["Description"] += line.strip()
+
+            else:
+                date = line[:desc_index-2].strip()
+                description = line[desc_index-2:valeur_index-2].strip()
+                valeur = line[valeur_index-2:valeur_index+10].strip()
+                if len(line) < credit_index-4:
+                    debit = line[valeur_index+10:].strip()
+                    debit = debit.replace(" ", "")
+                    credit = "0.0"
+                else:
+                    debit = "0.0"
+                    credit = line[valeur_index+10:].strip()
+                    credit = credit.replace(" ", "")
+
+                values = [date, description, valeur, debit, credit]
+                data.append(dict(zip(keys, values)))
+
+        # convert to dataframe
+        df = pd.DataFrame(data)
+        return df
+    
+    def _parse_doc_txt(self):
+        df = pd.DataFrame()
+        self.logger.log("Parsing document in text mode")
+        for i in range(len(self.parsed_document)):
+            page = self.parsed_document[i].text
+            if self._check_operations(page):
+                if i == 0:
+                    page_lines = self._strip_first_page(page)
+                    self.logger.log(f"Stripping first page {i}")
+                else:
+                    page_lines = self._strip_reg_page(page)
+                    self.logger.log(f"Stripping regular page {i}")
+
+                page_df = self._parse_page_txt(page_lines)
+                self.logger.log(f"Page {i} successfully parsed, {len(page_df)} operations found")
+                df = pd.concat([df, page_df], axis=0)
+            else:
+                self.logger.log(f"No operations found in page {i}")
+
+        self.data = df
+        self.logger.log(f"Document successfully parsed, {len(df)} operations found")
+        return None
+    
+    def _parse_operations_md(self, doc, page):
+        """Parse the operations from a parsed PDF document."""
+        d = doc.text
+        try:
+            info = d.split("|---|---|---|---|---|")[-1]
+            info = info.split("\n\n")[0]
+            infos = info.split("\n")
+        except Exception as e:
+            self.logger.error(f"Error parsing the PDF {self.document} on page {page}: {e}", title = "PDF parsing error")
+            if not self.handle_errors:
+                raise e
+
+        data = []
+        keys = ["Date", "Description", "Operation Date", "Debit (€)", "Credit (€)"]
+        for i in infos:
+            d = i.split("|")[1:6]
+            if len(d)==5 and d[0]!="":
+                data.append(dict(zip(keys, d)))
+
+        data = pd.DataFrame(data)
+        return data
+    
+    def _parse_doc_md(self):
+
+        try:
+            chunks = self.parsed_document[0].text.split("\n")
+
+            # get the first chunk that contains "RELEVE DE COMPTE "
+            for date in chunks:
+                if "RELEVE DE COMPTE" in date:
+                    break
+            
+            date = date.split("du")[1].split("au")[0].strip()[-4:]
+            self.start_year = int(date)
+        except Exception as e:
+            self.logger.error(f"Error when getting the start year: {e}", title = "Parsing error")
+            self.start_year = 2000
+            if not self.handle_errors:
+                raise e
+            
+
+        df = pd.DataFrame(columns = ["Date", "Description", "Operation Date", "Debit (€)", "Credit (€)"])
+        self.logger.log("Parsing document in markdown mode")
+        if self.parsed_document is not None:
+            for page, doc in enumerate(self.parsed_document):
+                try:
+                    for line in doc.text.split("\n"):
+                        if "SOLDE CREDITEUR" in line:
+                            break
+
+                    line = line.split("AU")[1].strip()[:15].strip()
+                    # Convert from dd.mm.yyyy to datetime
+                    if page == 0:
+                        self.start_date = pd.to_datetime(line, format="%d.%m.%Y")
+                        # Set end date to start date + 1 month
+                        self.end_date = self.start_date + pd.DateOffset(months=1)
+                    else:
+                        self.end_date = pd.to_datetime(line, format="%d.%m.%Y")
+
+                    data = self._parse_operations_md(doc, page)
+                    self.logger.log(f"Operations from page {page} successfully parsed")
+                except Exception as e:
+                    self.logger.error(f"Error parsing the PDF {self.document} on page {page}: {e}", title = "PDF parsing error")
+                    if not self.handle_errors:
+                        raise e
+                    else:
+                        continue
+
+                # Add the new data to the existing DataFrame
+                df = pd.concat([df, data], ignore_index=True)
+
+                self.logger.log(f"Operations from page {page} successfully added")
+
+
+        # delete the last 2 lines of the DataFrame as they are not operations
+        self.data = df[:-2]
+        if len(self.data)>0 and "SOLDE CREDITEUR" in self.data.iloc[0]["Description"]:
+            self.data = self.data[1:]
+
+    def parse_document(self):
+        if self.mode == "text":
+            self._parse_doc_txt()
+        else:
+            self._parse_doc_md()
+
+        self.format_dataframe()
+        return self.data
+
+
 
 class Monthly_Summary:
     """
@@ -150,7 +550,8 @@ class Monthly_Summary:
         now = datetime.now()
         # format the date as YYYY-MM-DD_HH-MM-SS
         now = now.strftime("%Y-%m-%d_%H-%M-%S")
-        self.logger = Logger(f"logs/monthly_summary_{self.pdf}_{now}.log", do_log = self.do_log, verbose = self.verbose, formatting = self.formatting)
+        logger_name = f"{LOG_FOLDER}/monthly_summary_{self.pdf.split('/')[-1].split('.')[0]}_{now}.log"
+        self.logger = Logger(logger_name, do_log = self.do_log, verbose = self.verbose, formatting = self.formatting)
         self.logger.log(f"Monthly summary created for {month} {year} with {len(self.operations)} operations")
         self.logger.log(f"PDF file: {pdf}")
         
@@ -186,11 +587,13 @@ class Monthly_Summary:
         return None
 
     @timeit
-    def add_operations(self, **kwargs):
+    def add_operations(self, mode = "text", **kwargs):
         """Load the PDF file, parse the operations and add them to the DataFrame.
 
         Parameters:
         -----------
+        mode : str, optional
+            The mode to use to parse the PDF file. Can be "text" or "markdown". Default is "text".  
         **kwargs : dict
             Additional keyword arguments to pass to the class.
             Examples: verbose (bool), do_log (bool, if True, logs will be saved to a file), formatting (bool, if True, logs will be formatted), rules_file (str, the path to the rules file), ask_rules (bool, if True, the user will be asked to provide rules for the categories), handle_errors (bool, if True, errors will be handled and logged)
@@ -205,38 +608,13 @@ class Monthly_Summary:
         self.logger.do_log = self.do_log
         self.logger.formatting = self.formatting
 
-        if self.operations is None:
-            # Initialize with an empty DataFrame
-            self.operations = pd.DataFrame(columns = ["Date", "Description", "Operation Date", "Debit (€)", "Credit (€)", "Category"])
 
-        try:
-            documents = self._load_pdf()
-            self.logger.log(f"PDF {self.pdf} loaded")
-        except Exception as e:
-            self.logger.error(f"Error loading the PDF {self.pdf}", title = "PDF loading error")
-            self.logger.error(f"Error: {e}")
-            if not self.handle_errors:
-                raise e
-            else:
-                return None
-            
-        if documents is not None:
-            for page, doc in enumerate(documents):
-                try:
-                    data = self._parse_operations(doc, page)
-                    self.logger.log(f"Operations from page {page} successfully parsed")
-                except Exception as e:
-                    self.logger.error(f"Error parsing the PDF {self.pdf} on page {page}: {e}", title = "PDF parsing error")
-                    if not self.handle_errors:
-                        raise e
-                    else:
-                        continue
-
-                # Add the new data to the existing DataFrame
-                self.operations = pd.concat([self.operations, data], ignore_index=True)
-
-                self.logger.log(f"Operations from page {page} successfully added")
-
+        self.parser = Statement_Parser(self.pdf, mode=mode, logger = self.logger, **kwargs)
+        self.parser.load_document()
+        
+        if self.parser.parsed_document is not None:
+            self.operations = self.parser.parse_document()
+            self.logger.log(f"Operations successfully added to the monthly summary for {self.month} {self.year}")
 
 
         try:
@@ -246,86 +624,15 @@ class Monthly_Summary:
             self.logger.error(f"Error adding categories to the monthly summary: {e}", title = "Category error")
             if not self.handle_errors:
                 raise e
-
-
-
-
-        # delete the last 2 lines of the DataFrame as they are not operations
-        self.operations = self.operations[:-2]
-        if len(self.operations)>0 and "SOLDE CREDITEUR" in self.operations.iloc[0]["Description"]:
-            self.operations = self.operations[1:]
         
-        try:
-            chunks = documents[0].text.split("\n")
+        # sort the operations by date
+        self.operations = self.operations.sort_values(by="Date")
 
-            # get the first chunk that contains "RELEVE DE COMPTE "
-            for date in chunks:
-                if "RELEVE DE COMPTE" in date:
-                    break
-            
-            date = date.split("du")[1]
-            date = date.split("au")[0]
-            date = date.strip()
+        self.month = self.operations["Date"].iloc[0].month
+        self.year = self.operations["Date"].iloc[0].year
+        self.start_date = self.parser.start_date
+        self.end_date = self.parser.end_date
 
-            months_mapping = {"janvier":1, "février":2, "mars":3, "avril":4, "mai":5, "juin":6, "juillet":7, "août":8, "septembre":9, "octobre":10, "novembre":11, "décembre":12}
-            
-            def match_date(date):
-                day, month, year = date.split(" ")
-                return datetime(int(year), months_mapping[month], int(day))
-
-            date = match_date(date)
-            self.start_date = date
-            # end date is start date plus one month
-            self.end_date = (date + pd.DateOffset(months=1))
-            self.month = date.month
-            self.year = date.year
-            self.logger.log(f"Month and year extracted from the PDF: {self.month} {self.year}")
-
-            # handle the case where the start year is different from the end year
-            if self.start_date.year != self.end_date.year:
-                # split the dates in the DataFrame into day and month
-                self.operations["Date"] = self.operations["Date"].str.split(".")
-                self.operations["Operation Date"] = self.operations["Operation Date"].str.split(".")                
-                def add_year(date):
-                    if date[1] == "01":
-                        return f"{date[0]}.{date[1]}.{self.end_date.year}"
-                    else:
-                        return f"{date[0]}.{date[1]}.{self.start_date.year}"
-                self.operations["Date"] = self.operations["Date"].apply(add_year)
-                self.operations["Operation Date"] = self.operations["Operation Date"].apply(add_year)
-
-            else:
-                # Add the year to all the dates in the DataFrame
-                self.operations["Date"] = self.operations["Date"] + f".{self.year}"
-                self.operations["Operation Date"] = self.operations["Operation Date"] + f".{self.year}"
-                
-        except Exception as e:
-            self.logger.error(f"Error while extracting the month and year from the PDF: {e}", title = "Date extraction error")
-            if not self.handle_errors:
-                raise e
-
-
-        try:
-            # Fill the missing values and blanks " " with 0
-            self.operations["Debit (€)"] = self.operations["Debit (€)"].str.replace(" ", "")
-            self.operations["Credit (€)"] = self.operations["Credit (€)"].str.replace(" ", "")
-
-            # Fill the empty values with 0
-            self.operations["Debit (€)"] = self.operations["Debit (€)"].replace("", "0")
-            self.operations["Credit (€)"] = self.operations["Credit (€)"].replace("", "0")
-
-            # Convert the amounts to float
-            self.operations["Debit (€)"] = self.operations["Debit (€)"].str.replace(",", ".").astype(float)
-            self.operations["Credit (€)"] = self.operations["Credit (€)"].str.replace(",", ".").astype(float)
-
-            # Convert the dates to datetime
-            self.operations["Date"] = pd.to_datetime(self.operations["Date"], format="%d.%m.%Y")
-            self.operations["Operation Date"] = pd.to_datetime(self.operations["Operation Date"], format="%d.%m.%Y")
-
-        except Exception as e:
-            self.logger.error(f"Error while formatting the operations data: {e}", title = "Formatting error")
-            if not self.handle_errors:
-                raise e
             
         if hasattr(self, "budget"):
             self.compute_remaining_budget()
@@ -491,10 +798,10 @@ class Monthly_Summary:
         """
         stats = self.get_stats(print_stats = False)
         self.remaining_budget = self.budget - stats["Total debit"]
-        self.logger.log(f"Total budget for {self.month} {self.year}: {self.budget}")
+        self.logger.log(f"Total budget for {months_mapping_inv[self.month]} {self.year}: {self.budget}")
         self.logger.log(f"Remaining budget: {self.remaining_budget}")
         if print_budget:
-            print(f"Total budget for {self.month} {self.year}: {self.budget}. Remaining budget: {self.remaining_budget}")
+            print(f"Total budget for {months_mapping_inv[self.month]} {self.year}: {self.budget}. Remaining budget: {self.remaining_budget}")
         return self.remaining_budget
 
     def to_csv(self, file = None):
@@ -584,9 +891,9 @@ class Monthly_Summary:
                 writer.book.create_sheet(sheet_name, 0)
                 writer.sheets[sheet_name].title = sheet_name
                 title_cell = writer.sheets[sheet_name].cell(row=1, column=1)
-                title_cell.value = f"Comptes pour le mois de {number_to_month[self.month]} {self.year}"
+                title_cell.value = f"Comptes pour le mois de {number_to_month[self.month]} {self.year} (du {self.start_date.date()} au {self.end_date.date()})"
                 title_cell.font = Font(bold=True, size=20)
-
+                      
                 # Adjust the height of the row
                 writer.sheets[sheet_name].row_dimensions[1].height = 30
 

@@ -1,9 +1,6 @@
 # Ignore virtual environment files
-finance_venv/
-finance_venv/Lib/
-finance_venv/Scripts/
-finance_venv/pyvenv.cfg
-fred_api_key.txt
+llamaparse_key.txt
+JB_courant_rules.txt
 # Personal folder
 Archives/
 Data/
